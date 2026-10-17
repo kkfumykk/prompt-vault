@@ -1,11 +1,14 @@
+import os
 import shutil
 import sqlite3
+import subprocess
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, Any
 
+BASE_DIR = Path(__file__).resolve().parent
 SRC_DIR = Path("c:/business/prompt_image_vault/data")
-DST_DIR = Path("c:/business/prompt_vault_public/data")
+DST_DIR = BASE_DIR / "data"
 
 SRC_DB = SRC_DIR / "database.sqlite"
 DST_DB = DST_DIR / "database.sqlite"
@@ -15,11 +18,33 @@ SRC_THUMBS = SRC_DIR / "thumbnails"
 DST_THUMBS = DST_DIR / "thumbnails"
 
 
+def push_to_github(added_count: int) -> bool:
+    """
+    新規画像が追加された場合に、自動でGitHubへコミット＆プッシュして
+    クラウド（Render）のWebサイトを自動最新化（Auto-Deploy）する。
+    """
+    try:
+        # dataディレクトリの変更をステージング
+        subprocess.run(["git", "add", "data"], cwd=BASE_DIR, check=True, capture_output=True)
+        # コミットする変更があるか確認
+        diff = subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=BASE_DIR)
+        if diff.returncode != 0:
+            commit_msg = f"sync: auto-sync {added_count} new images"
+            subprocess.run(["git", "commit", "-m", commit_msg], cwd=BASE_DIR, check=True, capture_output=True)
+            subprocess.run(["git", "push", "origin", "main"], cwd=BASE_DIR, check=True, capture_output=True)
+            print(f"[SYNC] GitHubへの自動プッシュ成功: {added_count}件の差分をクラウドへ反映中")
+            return True
+        return False
+    except Exception as e:
+        print(f"[SYNC] GitHub自動プッシュ警告 (クラウド同期スキップ): {e}")
+        return False
+
+
 def run_sync() -> Dict[str, Any]:
     """
     個人用Vault (prompt_image_vault) から 公開用Vault (prompt_vault_public) へ
-    新規・差分画像およびプロンプト・タグデータを安全に増分同期する。
-    ※ 公開版の settings テーブル（PixAI設定やX設定）は完全に維持されます。
+    新規・差分画像およびプロンプト・タグデータを安全に増分同期し、
+    新規追加がある場合は自動でGitHubへプッシュしてクラウド本番環境を更新する。
     """
     if not SRC_DB.exists():
         return {"status": "error", "message": f"同期元のデータベースが見つかりません: {SRC_DB}"}
@@ -104,12 +129,21 @@ def run_sync() -> Dict[str, Any]:
 
             dst_conn.commit()
 
+        # 新規画像がある場合、自動でGitHubへプッシュしてクラウド本番を最新化
+        pushed = False
+        if added_images > 0:
+            pushed = push_to_github(added_images)
+
+        cloud_status = " (クラウド本番へ自動反映中)" if pushed else ""
+        msg = f"同期完了: {added_images} 件の作品を公開版に反映しました{cloud_status}" if added_images > 0 else "差分なし（最新状態です）"
+
         result = {
             "status": "ok",
             "timestamp": now_str,
             "new_images_added": added_images,
             "files_copied": copied_files,
-            "message": f"同期完了: {added_images} 件の作品を公開版に反映しました" if added_images > 0 else "差分なし（最新状態です）"
+            "cloud_pushed": pushed,
+            "message": msg
         }
         return result
 
